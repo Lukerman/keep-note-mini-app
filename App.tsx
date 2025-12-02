@@ -1,11 +1,12 @@
-import React, { useState, useEffect } from 'react';
-import { Note, NoteColor, ViewMode } from './types';
+
+import React, { useState, useEffect, useMemo } from 'react';
+import { Note, NoteColor, ViewMode, ThemePreference } from './types';
 import Sidebar from './components/Sidebar';
 import CreateNote from './components/CreateNote';
 import NoteCard from './components/NoteCard';
-import { Search, Sparkles, Loader2, AlertCircle } from 'lucide-react';
+import FabMenu from './components/FabMenu';
+import { Search, Loader2, AlertCircle, Cloud, Menu, ChevronLeft, Pin, Archive, Trash2, Palette, Clock, CheckSquare, Image as ImageIcon, Tag, X, Plus } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
-import * as GeminiService from './services/geminiService';
 import { 
   fetchNotesFromSupabase, 
   createNoteInSupabase, 
@@ -13,363 +14,666 @@ import {
   deleteNoteFromSupabase 
 } from './services/supabaseClient';
 
-const App: React.FC = () => {
+export const App: React.FC = () => {
   const [notes, setNotes] = useState<Note[]>([]);
   const [view, setView] = useState<ViewMode>('notes');
+  const [selectedLabel, setSelectedLabel] = useState<string | null>(null); // New Label Filter State
   const [searchQuery, setSearchQuery] = useState('');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [selectedNote, setSelectedNote] = useState<Note | null>(null);
   
+  // Selection / Editing State
+  const [selectedNote, setSelectedNote] = useState<Note | null>(null);
+  const [modalTitle, setModalTitle] = useState('');
+  const [modalContent, setModalContent] = useState('');
+  const [modalImages, setModalImages] = useState<string[]>([]);
+  const [modalLabels, setModalLabels] = useState<string[]>([]); // Edit labels in modal
+  const [newModalLabel, setNewModalLabel] = useState('');
+  const [showModalPalette, setShowModalPalette] = useState(false);
+  
+  // Modal Checklist State
+  const [isModalListMode, setIsModalListMode] = useState(false);
+  const [modalChecklistItems, setModalChecklistItems] = useState<{text: string, checked: boolean}[]>([]);
+  
+  // Create Note State via FAB
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [createMode, setCreateMode] = useState<'text' | 'list' | 'image' | 'drawing' | 'audio'>('text');
+
   // User & Loading State
   const [userId, setUserId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isTelegram, setIsTelegram] = useState(true);
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error'>('saved');
 
-  // Modal AI State
-  const [aiLoading, setAiLoading] = useState(false);
-  const [modalTitle, setModalTitle] = useState('');
-  const [modalContent, setModalContent] = useState('');
+  // Theme State
+  const [themePreference, setThemePreference] = useState<ThemePreference>('system');
 
-  // Initialize Telegram WebApp and Fetch Data
+  // 1. Initialize & Auth
   useEffect(() => {
-    // Check if running in Telegram
-    if (window.Telegram?.WebApp) {
-      const tg = window.Telegram.WebApp;
-      tg.ready();
-      tg.expand();
+    const initApp = async () => {
+      // Check for Telegram Environment
+      const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
       
-      const user = tg.initDataUnsafe?.user;
-      
-      // Strict check: User must exist (valid Telegram Mini App session)
-      if (user) {
-        setUserId(user.id);
+      if (tgUser) {
+        setUserId(tgUser.id);
         setIsTelegram(true);
-        fetchData(user.id);
+        window.Telegram.WebApp.expand();
+        window.Telegram.WebApp.ready();
       } else {
-        // Telegram object exists (script loaded) but no user data (likely generic browser)
-        console.warn("No Telegram user found. Access denied.");
+        // Fallback for browser dev
         setIsTelegram(false);
-        setIsLoading(false);
+        setUserId(123456); // Test ID
       }
-    } else {
-      // Telegram script not found or environment invalid
-      console.warn("Telegram WebApp environment not detected.");
-      setIsTelegram(false);
-      setIsLoading(false);
-    }
+    };
+    initApp();
   }, []);
 
-  const fetchData = async (uid: number) => {
-    setIsLoading(true);
-    try {
-      const data = await fetchNotesFromSupabase(uid);
-      setNotes(data);
-    } catch (error) {
-      console.error("Critical error fetching data:", error);
-    } finally {
-      setIsLoading(false);
+  // 2. Fetch Data
+  useEffect(() => {
+    const fetchData = async () => {
+      if (!userId) return;
+      try {
+        setIsLoading(true);
+        const fetchedNotes = await fetchNotesFromSupabase(userId);
+        setNotes(fetchedNotes);
+      } catch (error) {
+        console.error("Failed to load notes", error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    fetchData();
+  }, [userId]);
+
+  // 3. Theme Handling
+  useEffect(() => {
+    const savedTheme = localStorage.getItem('theme_pref') as ThemePreference;
+    if (savedTheme) setThemePreference(savedTheme);
+  }, []);
+
+  useEffect(() => {
+    const tg = window.Telegram?.WebApp;
+    const systemScheme = tg?.colorScheme || 'light';
+    const effectiveTheme = themePreference === 'system' ? systemScheme : themePreference;
+
+    const root = document.documentElement;
+    if (effectiveTheme === 'dark') {
+        root.classList.add('dark');
+    } else {
+        root.classList.remove('dark');
     }
+
+    root.classList.remove('force-dark', 'force-light');
+    if (themePreference === 'dark') root.classList.add('force-dark');
+    else if (themePreference === 'light') root.classList.add('force-light');
+
+    if (tg) {
+        let headerColor = '#ffffff';
+        if (themePreference === 'dark' || (themePreference === 'system' && systemScheme === 'dark')) {
+            headerColor = '#18181b'; 
+        }
+        tg.setHeaderColor(headerColor);
+        tg.setBackgroundColor(headerColor);
+    }
+  }, [themePreference]);
+
+  const handleThemeChange = (newTheme: ThemePreference) => {
+    setThemePreference(newTheme);
+    localStorage.setItem('theme_pref', newTheme);
   };
 
-  const addNote = async (title: string, content: string, color: NoteColor) => {
+  // --- CRUD Operations ---
+
+  const handleCreateNote = async (title: string, content: string, color: NoteColor, labels: string[]) => {
+    if (!userId) return;
+    setSaveStatus('saving');
+    
     const newNote: Note = {
-      id: crypto.randomUUID(), // Ensure secure random IDs
+      id: crypto.randomUUID(),
       title,
       content,
-      color,
       isPinned: false,
       isArchived: false,
       isTrashed: false,
-      labels: [],
+      labels,
+      color,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
-    
-    // Optimistic Update
+
     setNotes(prev => [newNote, ...prev]);
+    setIsCreateModalOpen(false); 
 
-    // Persist to Supabase
-    if (userId !== null) {
-      await createNoteInSupabase(newNote, userId);
-    }
+    await createNoteInSupabase(newNote, userId);
+    setSaveStatus('saved');
+    setTimeout(() => setSaveStatus('saved'), 2000); 
   };
 
-  const updateNote = async (id: string, updates: Partial<Note>) => {
-    const timestamp = Date.now();
-    const finalUpdates = { ...updates, updatedAt: timestamp };
+  const handleUpdateNote = async (id: string, updates: Partial<Note>) => {
+    if (!userId) return;
+    setSaveStatus('saving');
 
-    // Optimistic Update
-    setNotes(prev => prev.map(n => n.id === id ? { ...n, ...finalUpdates } : n));
+    setNotes(prev => prev.map(n => n.id === id ? { ...n, ...updates, updatedAt: Date.now() } : n));
+    
     if (selectedNote && selectedNote.id === id) {
-        setSelectedNote(prev => prev ? { ...prev, ...finalUpdates } : null);
+        setSelectedNote(prev => prev ? { ...prev, ...updates } : null);
     }
 
-    // Persist to Supabase
-    await updateNoteInSupabase(id, finalUpdates);
+    await updateNoteInSupabase(id, updates);
+    setSaveStatus('saved');
   };
 
-  const deleteNote = (id: string) => {
-    updateNote(id, { isTrashed: true });
+  const handleDeleteNote = async (id: string) => {
+    const note = notes.find(n => n.id === id);
+    if (!note) return;
+
+    if (note.isTrashed) {
+        setNotes(prev => prev.filter(n => n.id !== id));
+        if (selectedNote?.id === id) setSelectedNote(null);
+        await deleteNoteFromSupabase(id);
+    } else {
+        handleUpdateNote(id, { isTrashed: true });
+        if (selectedNote?.id === id) setSelectedNote(null);
+    }
   };
 
-  const restoreNote = (id: string) => {
-    updateNote(id, { isTrashed: false });
+  const handleRestoreNote = (id: string) => {
+    handleUpdateNote(id, { isTrashed: false });
   };
 
-  const permanentlyDelete = async (id: string) => {
-    // Optimistic Update
-    setNotes(prev => prev.filter(n => n.id !== id));
-    if (selectedNote?.id === id) setSelectedNote(null);
+  // --- Modal Logic ---
 
-    // Persist to Supabase
-    await deleteNoteFromSupabase(id);
+  const openNoteModal = (note: Note) => {
+    setSelectedNote(note);
+    setModalTitle(note.title);
+    setModalLabels(note.labels || []);
+    
+    // Improved Image Extraction Regex
+    const imageRegex = /!\[.*?\]\((data:image\/.*?;base64,.*?)\)/g;
+    const extractedImages: string[] = [];
+    
+    let cleanContent = note.content.replace(imageRegex, (match, dataUrl) => {
+        extractedImages.push(dataUrl);
+        return ''; 
+    }).trim();
+
+    // Check for Checklist Pattern
+    const lines = cleanContent.split('\n');
+    // Simple heuristic: if lines start with checklist markdown
+    const hasChecklist = lines.length > 0 && lines.some(l => /^- \[[ x]\] /.test(l));
+
+    if (hasChecklist) {
+        setIsModalListMode(true);
+        const items = lines
+            .filter(l => l.trim() !== '') // Filter out empty lines potentially
+            .map(line => {
+                const match = line.match(/^- \[([ x])\] (.*)/);
+                if (match) {
+                    return { checked: match[1] === 'x', text: match[2] };
+                }
+                return { checked: false, text: line }; // Fallback for mixed content
+            });
+        setModalChecklistItems(items);
+        setModalContent(''); // Clear text content as we use list items
+    } else {
+        setIsModalListMode(false);
+        setModalChecklistItems([]);
+        setModalContent(cleanContent);
+    }
+
+    setModalImages(extractedImages);
+    setShowModalPalette(false);
+    
+    window.history.pushState({ noteId: note.id }, '');
   };
 
+  const closeNoteModal = () => {
+    if (selectedNote) {
+        let finalContent = modalContent;
+        
+        // Convert list back to markdown if in list mode
+        if (isModalListMode) {
+             finalContent = modalChecklistItems
+                .map(item => `- [${item.checked ? 'x' : ' '}] ${item.text}`)
+                .join('\n');
+        }
+
+        modalImages.forEach(img => {
+            finalContent += `\n![Image](${img})`;
+        });
+
+        if (selectedNote.title !== modalTitle || selectedNote.content !== finalContent || JSON.stringify(selectedNote.labels) !== JSON.stringify(modalLabels)) {
+            handleUpdateNote(selectedNote.id, { 
+                title: modalTitle, 
+                content: finalContent,
+                labels: modalLabels
+            });
+        }
+    }
+    setSelectedNote(null);
+    setModalImages([]);
+    setModalLabels([]);
+    setIsModalListMode(false);
+    setModalChecklistItems([]);
+    if (window.history.state?.noteId) {
+        window.history.back();
+    }
+  };
+
+  useEffect(() => {
+    const handlePopState = () => {
+        if (selectedNote) setSelectedNote(null);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [selectedNote]);
+
+  // Auto-save in modal
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (selectedNote) {
+         let fullContentForSave = modalContent;
+         
+         if (isModalListMode) {
+             fullContentForSave = modalChecklistItems
+                .map(item => `- [${item.checked ? 'x' : ' '}] ${item.text}`)
+                .join('\n');
+         }
+
+         fullContentForSave += modalImages.map(img => `\n![Image](${img})`).join('');
+
+         if (selectedNote.title !== modalTitle || selectedNote.content !== fullContentForSave) {
+            handleUpdateNote(selectedNote.id, { title: modalTitle, content: fullContentForSave });
+         }
+      }
+    }, 1000);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modalTitle, modalContent, modalImages, modalChecklistItems, isModalListMode]); 
+
+  const handleFabAction = (action: 'text' | 'list' | 'image' | 'drawing' | 'audio') => {
+    setCreateMode(action);
+    setIsCreateModalOpen(true);
+  };
+
+  const handleAddModalLabel = () => {
+     if(newModalLabel.trim() && !modalLabels.includes(newModalLabel.trim())) {
+         const updatedLabels = [...modalLabels, newModalLabel.trim()];
+         setModalLabels(updatedLabels);
+         handleUpdateNote(selectedNote!.id, { labels: updatedLabels });
+         setNewModalLabel('');
+     }
+  };
+
+  // Modal Checklist Helpers
+  const addModalChecklistItem = () => {
+      setModalChecklistItems([...modalChecklistItems, { text: '', checked: false }]);
+  };
+  const updateModalChecklistItem = (index: number, text: string) => {
+      const newItems = [...modalChecklistItems];
+      newItems[index].text = text;
+      setModalChecklistItems(newItems);
+  };
+  const toggleModalChecklistItem = (index: number) => {
+      const newItems = [...modalChecklistItems];
+      newItems[index].checked = !newItems[index].checked;
+      setModalChecklistItems(newItems);
+  };
+  const removeModalChecklistItem = (index: number) => {
+      setModalChecklistItems(modalChecklistItems.filter((_, i) => i !== index));
+  };
+
+
+  // --- Filtering ---
   const filteredNotes = notes.filter(note => {
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      return (note.title.toLowerCase().includes(q) || note.content.toLowerCase().includes(q)) && !note.isTrashed;
+    const matchesSearch = (note.title + note.content).toLowerCase().includes(searchQuery.toLowerCase());
+    
+    let matchesView = true;
+    if (selectedLabel) {
+        matchesView = (note.labels && note.labels.includes(selectedLabel)) && !note.isTrashed;
+    } else {
+        matchesView = 
+          view === 'notes' ? (!note.isArchived && !note.isTrashed) :
+          view === 'archive' ? note.isArchived :
+          view === 'trash' ? note.isTrashed : true;
     }
-    if (view === 'trash') return note.isTrashed;
-    if (view === 'archive') return note.isArchived && !note.isTrashed;
-    return !note.isArchived && !note.isTrashed;
+    
+    return matchesSearch && matchesView;
   });
 
   const pinnedNotes = filteredNotes.filter(n => n.isPinned);
   const otherNotes = filteredNotes.filter(n => !n.isPinned);
 
-  // Modal Handlers
-  const openModal = (note: Note) => {
-    setSelectedNote(note);
-    setModalTitle(note.title);
-    setModalContent(note.content);
-  };
+  const NoteGrid = ({ items }: { items: Note[] }) => (
+    <div className="columns-2 md:columns-3 lg:columns-4 gap-4 space-y-4 px-2 pb-4">
+      {items.map(note => (
+        <NoteCard 
+          key={note.id} 
+          note={note} 
+          onUpdate={handleUpdateNote} 
+          onDelete={handleDeleteNote}
+          onSelect={openNoteModal}
+          onRestore={handleRestoreNote}
+          onPermanentDelete={handleDeleteNote}
+        />
+      ))}
+    </div>
+  );
 
-  const closeModal = () => {
-    if (selectedNote) {
-        if (selectedNote.title !== modalTitle || selectedNote.content !== modalContent) {
-            updateNote(selectedNote.id, { title: modalTitle, content: modalContent });
-        }
-    }
-    setSelectedNote(null);
-  };
-
-  // AI Actions in Modal
-  const handleAIAction = async (action: 'summarize' | 'grammar' | 'elaborate') => {
-    if (!modalContent) return;
-    setAiLoading(true);
-    let result: string | null = null;
-
-    if (action === 'summarize') {
-        result = await GeminiService.summarizeNote(modalContent);
-    } else if (action === 'grammar') {
-        result = await GeminiService.fixGrammar(modalContent);
-    } else if (action === 'elaborate') {
-        result = await GeminiService.elaborateNote(modalContent);
-    }
-
-    if (result) {
-        setModalContent(result);
-    }
-    setAiLoading(false);
-  };
-
-  // 1. Check for Telegram Environment Logic
-  if (!isTelegram) {
+  if (!isTelegram && userId === null) {
     return (
-      <div className="min-h-screen bg-background flex flex-col items-center justify-center p-8 text-center text-zinc-300">
-        <div className="w-20 h-20 bg-red-900/20 text-red-500 rounded-full flex items-center justify-center mb-6 ring-1 ring-red-500/20">
-          <AlertCircle size={40} />
+      <div className="flex h-screen items-center justify-center bg-background text-textMain p-4 text-center">
+        <div>
+           <AlertCircle className="mx-auto mb-4 h-12 w-12 text-destructive" />
+           <h1 className="text-xl font-bold mb-2">Access Denied</h1>
+           <p className="text-textSecondary">Please open this app via Telegram.</p>
         </div>
-        <h1 className="text-3xl font-bold text-zinc-100 mb-4 tracking-tight">Access Denied</h1>
-        <p className="max-w-md text-lg text-zinc-400 leading-relaxed">
-          You are not open in Telegram mini app. 
-          <br /><br />
-          <span className="text-zinc-500 text-sm">Please open this app within Telegram to verify your identity and access your notes.</span>
-        </p>
       </div>
     );
   }
 
-  // 2. Loading State
-  if (isLoading) {
-    return (
-      <div className="min-h-screen bg-background flex flex-col items-center justify-center text-zinc-400">
-        <Loader2 size={40} className="animate-spin mb-4 text-primary" />
-        <p className="animate-pulse font-medium">Verifying Telegram ID...</p>
-      </div>
-    );
-  }
-
-  // 3. Main App Render
   return (
-    <div className="min-h-screen bg-background text-zinc-100 font-sans">
+    <div className="min-h-screen bg-background text-textMain font-sans transition-colors duration-300">
+      
+      {/* Header */}
+      <header className="sticky top-0 z-40 bg-background/80 backdrop-blur-md border-b border-separator px-4 py-3 flex items-center justify-between transition-colors">
+        <div className="flex items-center gap-3 w-full">
+          <button onClick={() => setIsSidebarOpen(true)} className="p-2 rounded-full hover:bg-surface text-textSecondary hover:text-textMain">
+            <Menu size={24} />
+          </button>
+          
+          <div className="flex-1 max-w-xl mx-auto relative group">
+            <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
+              <Search size={18} className="text-textSecondary group-focus-within:text-primary transition-colors" />
+            </div>
+            <input 
+              type="text" 
+              placeholder="Search Keep" 
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full bg-surface text-textMain rounded-xl py-2.5 pl-10 pr-4 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all placeholder-textSecondary"
+            />
+          </div>
+
+          <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-primary to-purple-500 flex items-center justify-center text-white font-bold shadow-md shrink-0">
+             {userId ? 'U' : 'G'}
+          </div>
+        </div>
+      </header>
+
+      {/* Sidebar */}
       <Sidebar 
-        currentView={view} 
-        onChangeView={setView} 
         isOpen={isSidebarOpen} 
-        toggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)} 
+        toggleSidebar={() => setIsSidebarOpen(false)}
+        currentView={view}
+        onChangeView={setView}
+        themePreference={themePreference}
+        onThemeChange={handleThemeChange}
+        labels={Array.from(new Set(notes.flatMap(n => n.labels || [])))}
+        selectedLabel={selectedLabel}
+        onSelectLabel={setSelectedLabel}
       />
 
-      <div className={`transition-all duration-300 ${isSidebarOpen ? 'md:pl-72' : 'md:pl-72'}`}>
-        
-        {/* Header */}
-        <header className="sticky top-0 z-30 bg-background/80 backdrop-blur-md border-b border-white/5 px-4 py-3 flex items-center justify-between">
-            <div className="flex items-center flex-1 max-w-2xl gap-4">
-                <div className="relative w-full group">
-                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                        <Search size={18} className="text-zinc-500 group-focus-within:text-primary transition-colors" />
-                    </div>
-                    <input 
-                        type="text" 
-                        placeholder="Search" 
-                        value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
-                        className="block w-full pl-10 pr-3 py-2.5 border-none rounded-lg leading-5 bg-neutral-800 text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all"
-                    />
-                </div>
-            </div>
-            <div className="ml-4 flex items-center gap-3">
-                 {/* ID Display (Optional, for verification) */}
-                 {userId && (
-                    <span className="hidden md:block text-[10px] uppercase font-bold tracking-wider text-zinc-600 bg-zinc-900 px-2 py-1 rounded">
-                      Linked to TG
-                    </span>
-                 )}
-                 <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-primary to-purple-500 flex items-center justify-center text-xs font-bold shadow-lg shadow-primary/20">
-                    MK
-                 </div>
-            </div>
-        </header>
-
-        <main className="p-4 md:p-8 max-w-7xl mx-auto min-h-[calc(100vh-80px)]">
-          
-          {view === 'notes' && !searchQuery && (
-            <CreateNote onCreate={addNote} />
-          )}
-
-          {pinnedNotes.length > 0 && !searchQuery && view === 'notes' && (
-            <div className="mb-8">
-               <h2 className="text-xs font-bold text-zinc-500 uppercase tracking-wider mb-3 px-2">Pinned</h2>
-               <div className="columns-1 md:columns-2 lg:columns-3 xl:columns-4 gap-4 space-y-4">
-                  <AnimatePresence>
-                     {pinnedNotes.map(note => (
-                         <NoteCard 
-                           key={note.id} 
-                           note={note} 
-                           onUpdate={updateNote} 
-                           onDelete={deleteNote} 
-                           onSelect={openModal}
-                         />
-                     ))}
-                  </AnimatePresence>
-               </div>
-            </div>
-          )}
-
-          {pinnedNotes.length > 0 && otherNotes.length > 0 && !searchQuery && view === 'notes' && (
-             <h2 className="text-xs font-bold text-zinc-500 uppercase tracking-wider mb-3 px-2 mt-8">Others</h2>
-          )}
-
-          <div className="columns-1 md:columns-2 lg:columns-3 xl:columns-4 gap-4 space-y-4">
-            <AnimatePresence mode='popLayout'>
-              {otherNotes.map(note => (
-                <NoteCard 
-                  key={note.id} 
-                  note={note} 
-                  onUpdate={updateNote} 
-                  onDelete={view === 'trash' ? permanentlyDelete : deleteNote} 
-                  onSelect={openModal}
-                  onRestore={view === 'trash' ? restoreNote : undefined}
-                  onPermanentDelete={view === 'trash' ? permanentlyDelete : undefined}
-                />
-              ))}
-            </AnimatePresence>
+      {/* Main Content */}
+      <main className="p-4 pb-24 max-w-7xl mx-auto min-h-[calc(100vh-80px)]">
+        {isLoading ? (
+          <div className="flex justify-center items-center h-64">
+            <Loader2 className="animate-spin text-primary" size={32} />
           </div>
-          
-          {otherNotes.length === 0 && pinnedNotes.length === 0 && (
-             <div className="flex flex-col items-center justify-center mt-20 text-zinc-500">
-                <Sparkles size={48} className="mb-4 opacity-20" />
-                <p>No notes here yet</p>
-             </div>
-          )}
+        ) : (
+          <>
+            {/* Context Title for Labels */}
+            {selectedLabel && (
+                <div className="flex items-center gap-2 mb-4 px-2">
+                    <div className="p-2 bg-primary/10 rounded-full text-primary">
+                        <Tag size={20} />
+                    </div>
+                    <span className="text-xl font-bold">{selectedLabel}</span>
+                    <button onClick={() => setSelectedLabel(null)} className="ml-auto text-sm text-primary hover:underline">
+                        Clear filter
+                    </button>
+                </div>
+            )}
 
-        </main>
-      </div>
+            {/* Desktop Create Note */}
+            <div className="hidden md:block">
+                 <CreateNote onCreate={handleCreateNote} />
+            </div>
 
-      {/* Edit Modal */}
+            {/* Empty State */}
+            {filteredNotes.length === 0 && (
+                <div className="flex flex-col items-center justify-center mt-20 text-textSecondary opacity-60">
+                    <Cloud size={64} strokeWidth={1} />
+                    <p className="mt-4 text-lg">
+                        {selectedLabel ? `No notes with label "${selectedLabel}"` : 'No notes here yet'}
+                    </p>
+                </div>
+            )}
+
+            {/* Notes Grid */}
+            {pinnedNotes.length > 0 && (
+              <div className="mb-8">
+                <h6 className="text-xs font-bold text-textSecondary uppercase tracking-wider mb-3 px-2">Pinned</h6>
+                <NoteGrid items={pinnedNotes} />
+              </div>
+            )}
+
+            {otherNotes.length > 0 && (
+              <div>
+                {pinnedNotes.length > 0 && <h6 className="text-xs font-bold text-textSecondary uppercase tracking-wider mb-3 px-2">Others</h6>}
+                <NoteGrid items={otherNotes} />
+              </div>
+            )}
+          </>
+        )}
+      </main>
+
+      {/* Floating Action Menu */}
+      <FabMenu onAction={handleFabAction} />
+
+      {/* Create Note Modal (triggered by FAB) */}
+      <AnimatePresence>
+         {isCreateModalOpen && (
+             <motion.div 
+                initial={{ opacity: 0, y: '100%' }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: '100%' }}
+                className="fixed inset-0 z-[60] bg-background flex flex-col"
+             >
+                <div className="flex-1 overflow-y-auto p-4 pt-10">
+                   <CreateNote 
+                      onCreate={handleCreateNote} 
+                      initialMode={createMode} 
+                      onClose={() => setIsCreateModalOpen(false)}
+                      isOpenExternal={true}
+                   />
+                </div>
+             </motion.div>
+         )}
+      </AnimatePresence>
+
+      {/* Edit Note Modal */}
       <AnimatePresence>
         {selectedNote && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-                <motion.div 
-                   initial={{ opacity: 0 }} 
-                   animate={{ opacity: 1 }} 
-                   exit={{ opacity: 0 }}
-                   onClick={closeModal}
-                   className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-                />
-                <motion.div 
-                   layoutId={`note-${selectedNote.id}`}
-                   className={`relative w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-xl shadow-2xl ${selectedNote.color} border border-white/10 flex flex-col`}
-                >
-                   {aiLoading && (
-                        <div className="absolute inset-0 z-50 bg-black/20 backdrop-blur-[2px] flex flex-col items-center justify-center text-white rounded-xl">
-                            <Loader2 size={32} className="animate-spin mb-2" />
-                            <span className="font-medium">AI is working magic...</span>
-                        </div>
-                   )}
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            transition={{ duration: 0.2 }}
+            className="fixed inset-0 z-50 bg-background/95 backdrop-blur-sm flex items-center justify-center p-0 md:p-6"
+            onClick={closeNoteModal}
+          >
+            <div 
+                className={`w-full md:max-w-3xl h-full md:h-auto md:max-h-[85vh] ${selectedNote.color.includes('bg-surface') ? 'bg-background' : selectedNote.color} md:rounded-2xl shadow-2xl flex flex-col overflow-hidden transition-colors duration-300 relative`}
+                onClick={(e) => e.stopPropagation()}
+            >
+                {/* Modal Header */}
+                <div className="flex items-center justify-between p-4 border-b border-black/5 dark:border-white/5 bg-transparent">
+                    <button onClick={closeNoteModal} className="p-2 -ml-2 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-textMain">
+                        <ChevronLeft size={24} />
+                    </button>
+                    <div className="flex items-center gap-1">
+                        <button 
+                            onClick={() => setIsModalListMode(!isModalListMode)} 
+                            className={`p-2 rounded-full hover:bg-black/5 dark:hover:bg-white/10 ${isModalListMode ? 'text-primary' : 'text-textSecondary'}`}
+                            title="Toggle List Mode"
+                        >
+                            <CheckSquare size={20} />
+                        </button>
+                        <button 
+                            onClick={() => handleUpdateNote(selectedNote.id, { isPinned: !selectedNote.isPinned })}
+                            className={`p-2 rounded-full hover:bg-black/5 dark:hover:bg-white/10 ${selectedNote.isPinned ? 'text-primary fill-current' : 'text-textSecondary'}`}
+                        >
+                            <Pin size={20} className={selectedNote.isPinned ? 'fill-current' : ''} />
+                        </button>
+                        <button 
+                            onClick={() => { handleUpdateNote(selectedNote.id, { isArchived: !selectedNote.isArchived }); closeNoteModal(); }}
+                            className={`p-2 rounded-full hover:bg-black/5 dark:hover:bg-white/10 ${selectedNote.isArchived ? 'text-primary' : 'text-textSecondary'}`}
+                        >
+                            <Archive size={20} />
+                        </button>
+                    </div>
+                </div>
 
-                   <div className="p-6">
-                        <input 
-                            value={modalTitle}
-                            onChange={(e) => setModalTitle(e.target.value)}
-                            className="w-full bg-transparent text-2xl font-bold text-zinc-100 placeholder-zinc-400 mb-4 focus:outline-none"
-                            placeholder="Title"
-                        />
+                {/* Modal Content */}
+                <div className="flex-1 overflow-y-auto p-4 md:p-8 no-scrollbar">
+                    <input 
+                        value={modalTitle}
+                        onChange={(e) => setModalTitle(e.target.value)}
+                        placeholder="Title"
+                        className="w-full bg-transparent text-2xl font-bold text-textMain placeholder-textSecondary/50 mb-4 focus:outline-none"
+                    />
+                    
+                    {/* Image Previews */}
+                    <div className="space-y-4 mb-4">
+                        {modalImages.map((img, idx) => (
+                            <div key={idx} className="relative group rounded-xl overflow-hidden shadow-sm">
+                                <img src={img} alt="Attachment" className="w-full h-auto max-h-96 object-contain bg-black/5 dark:bg-white/5" />
+                                <button 
+                                    onClick={() => setModalImages(prev => prev.filter((_, i) => i !== idx))}
+                                    className="absolute top-2 right-2 p-1.5 bg-black/50 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                                >
+                                    <Trash2 size={16} />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* Conditional Rendering: Checklist or Textarea */}
+                    {isModalListMode ? (
+                        <div className="space-y-2">
+                             {modalChecklistItems.map((item, index) => (
+                                <div key={index} className="flex items-center gap-2 group">
+                                    <button onClick={() => toggleModalChecklistItem(index)} className="text-textSecondary hover:text-primary">
+                                        {item.checked ? <CheckSquare size={20} className="text-textSecondary" /> : <div className="w-[20px] h-[20px] border-2 border-textSecondary rounded-sm" />}
+                                    </button>
+                                    <input 
+                                        value={item.text}
+                                        onChange={(e) => updateModalChecklistItem(index, e.target.value)}
+                                        className={`bg-transparent flex-1 focus:outline-none text-lg ${item.checked ? 'line-through text-textSecondary' : 'text-textMain'}`}
+                                        placeholder="List item"
+                                        onKeyDown={(e) => {
+                                            if(e.key === 'Enter') addModalChecklistItem();
+                                            if(e.key === 'Backspace' && item.text === '') removeModalChecklistItem(index);
+                                        }}
+                                    />
+                                    <button onClick={() => removeModalChecklistItem(index)} className="opacity-0 group-hover:opacity-100 p-1 text-textSecondary hover:text-destructive transition-opacity">
+                                        <X size={18} />
+                                    </button>
+                                </div>
+                            ))}
+                            <button onClick={addModalChecklistItem} className="flex items-center gap-2 text-textSecondary hover:text-textMain mt-3 font-medium">
+                                <Plus size={20} /> List item
+                            </button>
+                        </div>
+                    ) : (
                         <textarea 
                             value={modalContent}
                             onChange={(e) => setModalContent(e.target.value)}
-                            className="w-full min-h-[300px] bg-transparent text-zinc-200 placeholder-zinc-500 focus:outline-none resize-none leading-relaxed whitespace-pre-wrap"
-                            placeholder="Note content"
+                            placeholder="Note"
+                            className="w-full bg-transparent text-lg text-textMain placeholder-textSecondary/50 resize-none focus:outline-none min-h-[40vh] leading-relaxed"
                         />
-                   </div>
-
-                   <div className="sticky bottom-0 bg-black/10 backdrop-blur-md p-3 flex items-center justify-between border-t border-white/5">
-                        <div className="flex gap-2">
-                             <div className="group relative">
-                                <button className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-surface hover:bg-surfaceHover text-primary border border-primary/20 transition-all text-sm font-medium">
-                                    <Sparkles size={16} />
-                                    <span>AI Tools</span>
-                                </button>
-                                <div className="absolute bottom-full left-0 mb-2 w-48 bg-surface border border-neutral-700 rounded-lg shadow-xl overflow-hidden hidden group-hover:block">
-                                    <button onClick={() => handleAIAction('grammar')} className="w-full text-left px-4 py-2 text-sm text-zinc-300 hover:bg-primary/20 hover:text-white transition-colors">
-                                        Fix Grammar
-                                    </button>
-                                    <button onClick={() => handleAIAction('summarize')} className="w-full text-left px-4 py-2 text-sm text-zinc-300 hover:bg-primary/20 hover:text-white transition-colors">
-                                        Summarize
-                                    </button>
-                                    <button onClick={() => handleAIAction('elaborate')} className="w-full text-left px-4 py-2 text-sm text-zinc-300 hover:bg-primary/20 hover:text-white transition-colors">
-                                        Elaborate
-                                    </button>
-                                </div>
-                             </div>
-                             <button className="p-2 text-zinc-400 hover:text-zinc-100 rounded-full hover:bg-white/10" title="Color">
-                                {/* Simple color toggle for demo or full palette reuse */}
-                             </button>
+                    )}
+                    
+                    {/* Modal Labels */}
+                    <div className="mt-8 flex flex-wrap gap-2 items-center">
+                        {modalLabels.map(label => (
+                            <span key={label} className="px-3 py-1 bg-black/5 dark:bg-white/10 rounded-full text-sm flex items-center gap-1 group">
+                                {label}
+                                <button onClick={() => {
+                                    const newLabels = modalLabels.filter(l => l !== label);
+                                    setModalLabels(newLabels);
+                                    handleUpdateNote(selectedNote.id, { labels: newLabels });
+                                }} className="hover:text-destructive"><X size={14}/></button>
+                            </span>
+                        ))}
+                        <div className="flex items-center gap-2 bg-black/5 dark:bg-white/5 px-2 py-1 rounded-full">
+                            <Plus size={14} className="text-textSecondary" />
+                            <input 
+                                className="bg-transparent focus:outline-none text-sm w-20"
+                                placeholder="Add label"
+                                value={newModalLabel}
+                                onChange={e => setNewModalLabel(e.target.value)}
+                                onKeyDown={e => e.key === 'Enter' && handleAddModalLabel()}
+                            />
                         </div>
+                    </div>
+                </div>
+
+                {/* Bottom Toolbar */}
+                <div className="p-3 bg-surface/50 border-t border-separator backdrop-blur-md flex items-center justify-between text-textSecondary text-sm">
+                    {/* Left: Color Picker */}
+                    <div className="relative">
                         <button 
-                            onClick={closeModal}
-                            className="px-6 py-1.5 bg-neutral-900 hover:bg-black text-white rounded-lg font-medium transition-colors"
+                            onClick={() => setShowModalPalette(!showModalPalette)}
+                            className="p-2 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-textMain"
                         >
-                            Close
+                            <Palette size={20} />
                         </button>
-                   </div>
-                </motion.div>
+                        {showModalPalette && (
+                            <div className="absolute bottom-full left-0 mb-4 ml-[-8px] p-3 bg-surface border border-separator rounded-2xl shadow-xl grid grid-cols-5 gap-2 w-[180px]">
+                                {Object.values(NoteColor).map(c => (
+                                    <button
+                                        key={c}
+                                        onClick={() => {
+                                            handleUpdateNote(selectedNote.id, { color: c });
+                                            setShowModalPalette(false);
+                                        }}
+                                        className={`w-6 h-6 rounded-full border border-black/10 dark:border-white/10 ${c.split(' ')[0]} ${selectedNote.color === c ? 'ring-2 ring-primary' : ''}`}
+                                    />
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Center: Last Edited */}
+                    <div className="flex items-center gap-1.5 opacity-60">
+                        {saveStatus === 'saving' ? (
+                            <span className="animate-pulse">Saving...</span>
+                        ) : (
+                            <>
+                                <Clock size={12} />
+                                <span className="text-xs">
+                                    Edited {new Date(selectedNote.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                </span>
+                            </>
+                        )}
+                    </div>
+
+                    {/* Right: Delete */}
+                    <div className="flex items-center gap-1">
+                         <button 
+                            onClick={() => { handleDeleteNote(selectedNote.id); closeNoteModal(); }}
+                            className="p-2 rounded-full hover:bg-destructive/10 hover:text-destructive transition-colors"
+                        >
+                            <Trash2 size={20} />
+                        </button>
+                    </div>
+                </div>
             </div>
+          </motion.div>
         )}
       </AnimatePresence>
+
     </div>
   );
 };
-
-export default App;
