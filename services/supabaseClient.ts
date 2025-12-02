@@ -1,10 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 import { Note } from '../types';
+import { config } from '../config';
 
-const SUPABASE_URL = 'https://lqeqhblqqjvcbwltcwya.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxxZXFoYmxxcWp2Y2J3bHRjd3lhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ2MTMyODgsImV4cCI6MjA4MDE4OTI4OH0.jSMxXsJ5KakUBbrVZGVbVpU_egGiBOLTtQJgQAEzyyw';
-
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+export const supabase = createClient(config.supabase.url, config.supabase.anonKey);
 
 // Helper to map DB columns (snake_case) to App types (camelCase)
 const mapFromDB = (record: any): Note => ({
@@ -16,6 +14,7 @@ const mapFromDB = (record: any): Note => ({
   isArchived: record.is_archived,
   isTrashed: record.is_trashed,
   labels: record.labels || [],
+  orderIndex: record.order_index,
   // Supabase/Postgres returns dates as ISO strings
   createdAt: record.created_at ? new Date(record.created_at).getTime() : Date.now(),
   updatedAt: record.updated_at ? new Date(record.updated_at).getTime() : Date.now(),
@@ -32,6 +31,7 @@ const mapToDB = (note: Note, userId: number) => ({
   is_archived: note.isArchived,
   is_trashed: note.isTrashed,
   labels: note.labels,
+  order_index: note.orderIndex,
   // Postgres timestamptz requires ISO string
   created_at: new Date(note.createdAt).toISOString(),
   updated_at: new Date(note.updatedAt).toISOString(),
@@ -43,6 +43,7 @@ export const fetchNotesFromSupabase = async (userId: number): Promise<Note[]> =>
       .from('notes')
       .select('*')
       .eq('user_id', userId)
+      .order('order_index', { ascending: true })
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -79,6 +80,7 @@ export const updateNoteInSupabase = async (id: string, updates: Partial<Note>) =
     if (updates.isArchived !== undefined) dbUpdates.is_archived = updates.isArchived;
     if (updates.isTrashed !== undefined) dbUpdates.is_trashed = updates.isTrashed;
     if (updates.labels !== undefined) dbUpdates.labels = updates.labels;
+    if (updates.orderIndex !== undefined) dbUpdates.order_index = updates.orderIndex;
     if (updates.updatedAt !== undefined) dbUpdates.updated_at = new Date(updates.updatedAt).toISOString();
 
     const { error } = await supabase
@@ -102,5 +104,18 @@ export const deleteNoteFromSupabase = async (id: string) => {
     if (error) console.error('Supabase Delete Error:', JSON.stringify(error, null, 2));
   } catch (err) {
     console.error('Unexpected Error deleting note:', err);
+  }
+};
+
+export const updateNotesOrder = async (updates: { id: string, orderIndex: number }[]) => {
+  try {
+    // Perform bulk upsert for order_index
+    const { error } = await supabase
+      .from('notes')
+      .upsert(updates.map(u => ({ id: u.id, order_index: u.orderIndex, updated_at: new Date().toISOString() })), { onConflict: 'id', ignoreDuplicates: false });
+
+    if (error) console.error('Supabase Order Update Error:', JSON.stringify(error, null, 2));
+  } catch (err) {
+    console.error('Unexpected Error updating notes order:', err);
   }
 };

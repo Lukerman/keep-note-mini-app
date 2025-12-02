@@ -22,6 +22,7 @@ export interface Note {
   color: NoteColor;
   createdAt: number;
   updatedAt: number;
+  orderIndex?: number;
 }
 
 export type ViewMode = 'notes' | 'archive' | 'trash' | 'search';

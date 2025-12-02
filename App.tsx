@@ -1,9 +1,9 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { Note, NoteColor, ViewMode, ThemePreference } from './types';
 import Sidebar from './components/Sidebar';
 import CreateNote from './components/CreateNote';
 import NoteCard from './components/NoteCard';
+import SortableNoteWrapper from './components/SortableNoteWrapper';
 import FabMenu from './components/FabMenu';
 import { Search, Loader2, AlertCircle, Cloud, Menu, ChevronLeft, Pin, Archive, Trash2, Palette, Clock, CheckSquare, Image as ImageIcon, Tag, X, Plus } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -11,13 +11,34 @@ import {
   fetchNotesFromSupabase, 
   createNoteInSupabase, 
   updateNoteInSupabase, 
-  deleteNoteFromSupabase 
+  deleteNoteFromSupabase,
+  updateNotesOrder
 } from './services/supabaseClient';
+
+// DND Kit Imports
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragOverlay,
+  DragEndEvent,
+  TouchSensor,
+  MouseSensor
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  rectSortingStrategy,
+} from '@dnd-kit/sortable';
 
 export const App: React.FC = () => {
   const [notes, setNotes] = useState<Note[]>([]);
   const [view, setView] = useState<ViewMode>('notes');
-  const [selectedLabel, setSelectedLabel] = useState<string | null>(null); // New Label Filter State
+  const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   
@@ -26,7 +47,7 @@ export const App: React.FC = () => {
   const [modalTitle, setModalTitle] = useState('');
   const [modalContent, setModalContent] = useState('');
   const [modalImages, setModalImages] = useState<string[]>([]);
-  const [modalLabels, setModalLabels] = useState<string[]>([]); // Edit labels in modal
+  const [modalLabels, setModalLabels] = useState<string[]>([]);
   const [newModalLabel, setNewModalLabel] = useState('');
   const [showModalPalette, setShowModalPalette] = useState(false);
   
@@ -47,10 +68,24 @@ export const App: React.FC = () => {
   // Theme State
   const [themePreference, setThemePreference] = useState<ThemePreference>('system');
 
+  // DND State
+  const [activeDragId, setActiveDragId] = useState<string | null>(null);
+
+  // DND Sensors
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 8, // Require 8px movement before drag starts to allow clicks
+      },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
+
   // 1. Initialize & Auth
   useEffect(() => {
     const initApp = async () => {
-      // Check for Telegram Environment
       const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
       
       if (tgUser) {
@@ -59,9 +94,8 @@ export const App: React.FC = () => {
         window.Telegram.WebApp.expand();
         window.Telegram.WebApp.ready();
       } else {
-        // Fallback for browser dev
         setIsTelegram(false);
-        setUserId(123456); // Test ID
+        setUserId(123456); 
       }
     };
     initApp();
@@ -127,6 +161,11 @@ export const App: React.FC = () => {
     if (!userId) return;
     setSaveStatus('saving');
     
+    // Put new note at the beginning of the list logic (lowest orderIndex or unshifted)
+    // For simplicity, we assign it orderIndex 0 and we might need to shift others, 
+    // or just let it float.
+    const minIndex = notes.length > 0 ? Math.min(...notes.map(n => n.orderIndex || 0)) : 0;
+    
     const newNote: Note = {
       id: crypto.randomUUID(),
       title,
@@ -138,6 +177,7 @@ export const App: React.FC = () => {
       color,
       createdAt: Date.now(),
       updatedAt: Date.now(),
+      orderIndex: minIndex - 1, // Ensure it's at the top
     };
 
     setNotes(prev => [newNote, ...prev]);
@@ -180,14 +220,46 @@ export const App: React.FC = () => {
     handleUpdateNote(id, { isTrashed: false });
   };
 
-  // --- Modal Logic ---
+  // --- Drag and Drop Logic ---
 
+  const handleDragStart = (event: any) => {
+    setActiveDragId(event.active.id);
+  };
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    
+    setActiveDragId(null);
+
+    if (over && active.id !== over.id) {
+      setNotes((items) => {
+        const oldIndex = items.findIndex((i) => i.id === active.id);
+        const newIndex = items.findIndex((i) => i.id === over.id);
+        
+        const newItems = arrayMove(items, oldIndex, newIndex);
+        
+        // Persist the new order by updating orderIndex for the affected slice
+        // To be safe and simple, we update indices for the whole list based on array position
+        const updates = newItems.map((note, index) => ({
+            id: note.id,
+            orderIndex: index
+        }));
+
+        // Fire and forget update
+        updateNotesOrder(updates);
+
+        return newItems;
+      });
+    }
+  };
+
+  // --- Modal Logic ---
+  // (Kept same as before)
   const openNoteModal = (note: Note) => {
     setSelectedNote(note);
     setModalTitle(note.title);
     setModalLabels(note.labels || []);
     
-    // Improved Image Extraction Regex
     const imageRegex = /!\[.*?\]\((data:image\/.*?;base64,.*?)\)/g;
     const extractedImages: string[] = [];
     
@@ -196,24 +268,22 @@ export const App: React.FC = () => {
         return ''; 
     }).trim();
 
-    // Check for Checklist Pattern
     const lines = cleanContent.split('\n');
-    // Simple heuristic: if lines start with checklist markdown
     const hasChecklist = lines.length > 0 && lines.some(l => /^- \[[ x]\] /.test(l));
 
     if (hasChecklist) {
         setIsModalListMode(true);
         const items = lines
-            .filter(l => l.trim() !== '') // Filter out empty lines potentially
+            .filter(l => l.trim() !== '')
             .map(line => {
                 const match = line.match(/^- \[([ x])\] (.*)/);
                 if (match) {
                     return { checked: match[1] === 'x', text: match[2] };
                 }
-                return { checked: false, text: line }; // Fallback for mixed content
+                return { checked: false, text: line };
             });
         setModalChecklistItems(items);
-        setModalContent(''); // Clear text content as we use list items
+        setModalContent(''); 
     } else {
         setIsModalListMode(false);
         setModalChecklistItems([]);
@@ -229,14 +299,11 @@ export const App: React.FC = () => {
   const closeNoteModal = () => {
     if (selectedNote) {
         let finalContent = modalContent;
-        
-        // Convert list back to markdown if in list mode
         if (isModalListMode) {
              finalContent = modalChecklistItems
                 .map(item => `- [${item.checked ? 'x' : ' '}] ${item.text}`)
                 .join('\n');
         }
-
         modalImages.forEach(img => {
             finalContent += `\n![Image](${img})`;
         });
@@ -267,27 +334,22 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('popstate', handlePopState);
   }, [selectedNote]);
 
-  // Auto-save in modal
   useEffect(() => {
     const timer = setTimeout(() => {
       if (selectedNote) {
          let fullContentForSave = modalContent;
-         
          if (isModalListMode) {
              fullContentForSave = modalChecklistItems
                 .map(item => `- [${item.checked ? 'x' : ' '}] ${item.text}`)
                 .join('\n');
          }
-
          fullContentForSave += modalImages.map(img => `\n![Image](${img})`).join('');
-
          if (selectedNote.title !== modalTitle || selectedNote.content !== fullContentForSave) {
             handleUpdateNote(selectedNote.id, { title: modalTitle, content: fullContentForSave });
          }
       }
     }, 1000);
     return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modalTitle, modalContent, modalImages, modalChecklistItems, isModalListMode]); 
 
   const handleFabAction = (action: 'text' | 'list' | 'image' | 'drawing' | 'audio') => {
@@ -304,29 +366,15 @@ export const App: React.FC = () => {
      }
   };
 
-  // Modal Checklist Helpers
-  const addModalChecklistItem = () => {
-      setModalChecklistItems([...modalChecklistItems, { text: '', checked: false }]);
-  };
-  const updateModalChecklistItem = (index: number, text: string) => {
-      const newItems = [...modalChecklistItems];
-      newItems[index].text = text;
-      setModalChecklistItems(newItems);
-  };
-  const toggleModalChecklistItem = (index: number) => {
-      const newItems = [...modalChecklistItems];
-      newItems[index].checked = !newItems[index].checked;
-      setModalChecklistItems(newItems);
-  };
-  const removeModalChecklistItem = (index: number) => {
-      setModalChecklistItems(modalChecklistItems.filter((_, i) => i !== index));
-  };
+  const addModalChecklistItem = () => { setModalChecklistItems([...modalChecklistItems, { text: '', checked: false }]); };
+  const updateModalChecklistItem = (index: number, text: string) => { const newItems = [...modalChecklistItems]; newItems[index].text = text; setModalChecklistItems(newItems); };
+  const toggleModalChecklistItem = (index: number) => { const newItems = [...modalChecklistItems]; newItems[index].checked = !newItems[index].checked; setModalChecklistItems(newItems); };
+  const removeModalChecklistItem = (index: number) => { setModalChecklistItems(modalChecklistItems.filter((_, i) => i !== index)); };
 
 
   // --- Filtering ---
   const filteredNotes = notes.filter(note => {
     const matchesSearch = (note.title + note.content).toLowerCase().includes(searchQuery.toLowerCase());
-    
     let matchesView = true;
     if (selectedLabel) {
         matchesView = (note.labels && note.labels.includes(selectedLabel)) && !note.isTrashed;
@@ -336,27 +384,52 @@ export const App: React.FC = () => {
           view === 'archive' ? note.isArchived :
           view === 'trash' ? note.isTrashed : true;
     }
-    
     return matchesSearch && matchesView;
   });
 
   const pinnedNotes = filteredNotes.filter(n => n.isPinned);
   const otherNotes = filteredNotes.filter(n => !n.isPinned);
+  const draggedNote = notes.find(n => n.id === activeDragId);
 
-  const NoteGrid = ({ items }: { items: Note[] }) => (
-    <div className="columns-2 md:columns-3 lg:columns-4 gap-4 space-y-4 px-2 pb-4">
-      {items.map(note => (
-        <NoteCard 
-          key={note.id} 
-          note={note} 
-          onUpdate={handleUpdateNote} 
-          onDelete={handleDeleteNote}
-          onSelect={openNoteModal}
-          onRestore={handleRestoreNote}
-          onPermanentDelete={handleDeleteNote}
-        />
-      ))}
-    </div>
+  // Note Grid Component with DND
+  const SortableNoteGrid = ({ items, idPrefix }: { items: Note[], idPrefix: string }) => (
+    <DndContext 
+        sensors={sensors} 
+        collisionDetection={closestCenter} 
+        onDragStart={handleDragStart} 
+        onDragEnd={handleDragEnd}
+    >
+        <SortableContext items={items.map(n => n.id)} strategy={rectSortingStrategy}>
+            {/* Switched to Grid Layout for reliable Drag and Drop. Masonry DND is extremely complex without absolute positioning */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 pb-4">
+                {items.map(note => (
+                    <SortableNoteWrapper 
+                        key={note.id} 
+                        note={note} 
+                        onUpdate={handleUpdateNote} 
+                        onDelete={handleDeleteNote}
+                        onSelect={openNoteModal}
+                        onRestore={handleRestoreNote}
+                        onPermanentDelete={handleDeleteNote}
+                        disabled={view !== 'notes' || !!selectedLabel} // Disable DND in trash/archive or when filtering
+                    />
+                ))}
+            </div>
+        </SortableContext>
+        
+        <DragOverlay>
+            {draggedNote ? (
+                 <div className="opacity-90 scale-105 shadow-2xl">
+                     <NoteCard 
+                        note={draggedNote} 
+                        onUpdate={() => {}} 
+                        onDelete={() => {}} 
+                        onSelect={() => {}}
+                     />
+                 </div>
+            ) : null}
+        </DragOverlay>
+    </DndContext>
   );
 
   if (!isTelegram && userId === null) {
@@ -421,7 +494,6 @@ export const App: React.FC = () => {
           </div>
         ) : (
           <>
-            {/* Context Title for Labels */}
             {selectedLabel && (
                 <div className="flex items-center gap-2 mb-4 px-2">
                     <div className="p-2 bg-primary/10 rounded-full text-primary">
@@ -434,12 +506,10 @@ export const App: React.FC = () => {
                 </div>
             )}
 
-            {/* Desktop Create Note */}
             <div className="hidden md:block">
                  <CreateNote onCreate={handleCreateNote} />
             </div>
 
-            {/* Empty State */}
             {filteredNotes.length === 0 && (
                 <div className="flex flex-col items-center justify-center mt-20 text-textSecondary opacity-60">
                     <Cloud size={64} strokeWidth={1} />
@@ -449,28 +519,27 @@ export const App: React.FC = () => {
                 </div>
             )}
 
-            {/* Notes Grid */}
+            {/* We render dragged notes via DND only in main view to avoid sorting confusion */}
             {pinnedNotes.length > 0 && (
               <div className="mb-8">
                 <h6 className="text-xs font-bold text-textSecondary uppercase tracking-wider mb-3 px-2">Pinned</h6>
-                <NoteGrid items={pinnedNotes} />
+                <SortableNoteGrid items={pinnedNotes} idPrefix="pinned" />
               </div>
             )}
 
             {otherNotes.length > 0 && (
               <div>
                 {pinnedNotes.length > 0 && <h6 className="text-xs font-bold text-textSecondary uppercase tracking-wider mb-3 px-2">Others</h6>}
-                <NoteGrid items={otherNotes} />
+                <SortableNoteGrid items={otherNotes} idPrefix="others" />
               </div>
             )}
           </>
         )}
       </main>
 
-      {/* Floating Action Menu */}
       <FabMenu onAction={handleFabAction} />
 
-      {/* Create Note Modal (triggered by FAB) */}
+      {/* Create Modal */}
       <AnimatePresence>
          {isCreateModalOpen && (
              <motion.div 
@@ -491,7 +560,7 @@ export const App: React.FC = () => {
          )}
       </AnimatePresence>
 
-      {/* Edit Note Modal */}
+      {/* Edit Modal */}
       <AnimatePresence>
         {selectedNote && (
           <motion.div 
@@ -543,7 +612,6 @@ export const App: React.FC = () => {
                         className="w-full bg-transparent text-2xl font-bold text-textMain placeholder-textSecondary/50 mb-4 focus:outline-none"
                     />
                     
-                    {/* Image Previews */}
                     <div className="space-y-4 mb-4">
                         {modalImages.map((img, idx) => (
                             <div key={idx} className="relative group rounded-xl overflow-hidden shadow-sm">
@@ -558,7 +626,6 @@ export const App: React.FC = () => {
                         ))}
                     </div>
 
-                    {/* Conditional Rendering: Checklist or Textarea */}
                     {isModalListMode ? (
                         <div className="space-y-2">
                              {modalChecklistItems.map((item, index) => (
@@ -594,7 +661,6 @@ export const App: React.FC = () => {
                         />
                     )}
                     
-                    {/* Modal Labels */}
                     <div className="mt-8 flex flex-wrap gap-2 items-center">
                         {modalLabels.map(label => (
                             <span key={label} className="px-3 py-1 bg-black/5 dark:bg-white/10 rounded-full text-sm flex items-center gap-1 group">
@@ -619,9 +685,7 @@ export const App: React.FC = () => {
                     </div>
                 </div>
 
-                {/* Bottom Toolbar */}
                 <div className="p-3 bg-surface/50 border-t border-separator backdrop-blur-md flex items-center justify-between text-textSecondary text-sm">
-                    {/* Left: Color Picker */}
                     <div className="relative">
                         <button 
                             onClick={() => setShowModalPalette(!showModalPalette)}
@@ -645,7 +709,6 @@ export const App: React.FC = () => {
                         )}
                     </div>
 
-                    {/* Center: Last Edited */}
                     <div className="flex items-center gap-1.5 opacity-60">
                         {saveStatus === 'saving' ? (
                             <span className="animate-pulse">Saving...</span>
@@ -659,7 +722,6 @@ export const App: React.FC = () => {
                         )}
                     </div>
 
-                    {/* Right: Delete */}
                     <div className="flex items-center gap-1">
                          <button 
                             onClick={() => { handleDeleteNote(selectedNote.id); closeNoteModal(); }}
