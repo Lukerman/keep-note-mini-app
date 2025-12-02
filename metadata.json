@@ -1,0 +1,5 @@
+{
+  "name": "MindKeep AI",
+  "description": "A Google Keep alternative featuring advanced UI, masonry layout, and integrated Gemini AI for smart note summarization, title generation, and formatting.",
+  "requestFramePermissions": []
+}
